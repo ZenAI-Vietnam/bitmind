@@ -1,0 +1,12 @@
+bitmind_video_3_classes/
+cache
+.venv/
+wandb/
+video/
+temp/
+__pycache__/
+samples
+.env
+*.onnx
+*.jsonl
+id_rsa
