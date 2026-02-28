@@ -1,0 +1,11 @@
+name: "my-video-detector"
+version: "1.0.0"
+modality: "video"
+
+preprocessing:
+  resize: [224, 224]       # Target [H, W] for each frame
+  num_frames: 16           # Maximum frames to sample
+
+model:
+  num_classes: 2
+  weights_file: "model.safetensors"

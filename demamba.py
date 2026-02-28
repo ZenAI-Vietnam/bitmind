@@ -31,10 +31,10 @@ def reorder_data(data, N):
 
 class XCLIP_DeMamba(nn.Module):
     def __init__(
-        self, channel_size=768, class_num=2
+        self, model_name='xclip-base-patch16', channel_size=768, class_num=2
     ):
         super(XCLIP_DeMamba, self).__init__()
-        self.encoder = XCLIPVisionModel.from_pretrained("microsoft/xclip-base-patch16")
+        self.encoder = XCLIPVisionModel.from_pretrained(model_name)
         blocks = []
         channel = 768
         self.fusing_ratios = 1
@@ -45,7 +45,6 @@ class XCLIP_DeMamba(nn.Module):
         self.fc_norm = nn.LayerNorm(self.patch_nums*channel)
         self.fc_norm2 = nn.LayerNorm(768)
         self.initialize_weights(self.fc1)
-        self.dropout = nn.Dropout(p=0.0)
 
     def initialize_weights(self, module):
         for m in module.modules():
@@ -91,7 +90,6 @@ class XCLIP_DeMamba(nn.Module):
         video_level_features = torch.cat((global_feat, video_level_features), dim=1)
 
         pred = self.fc1(video_level_features)
-        pred = self.dropout(pred)
 
         return pred
 
@@ -157,6 +155,8 @@ class XCLIP_DeMamba(nn.Module):
 
 #         return x
 
-# if __name__ == '__main__':
-#     model = CLIP_DeMamba()
-#     print(model)
+if __name__ == '__main__':
+    model = XCLIP_DeMamba(model_name="microsoft/xclip-base-patch16-16-frames")
+    random_input = torch.randn(1, 16, 3, 224, 224)
+    output = model(random_input)
+    print(output.shape)

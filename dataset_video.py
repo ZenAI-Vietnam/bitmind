@@ -6,15 +6,11 @@ from typing import Dict, Tuple, Callable, List
 
 import torch
 import numpy as np
-import cv2
-from PIL import Image, ImageFile
+from decord import VideoReader, cpu
 from torch.utils.data import Dataset
 
 from transforms import apply_random_augmentations
 from torchvision import transforms
-
-
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def _apply_augmentations(image: np.ndarray, level_probs: Dict[int, float], 
@@ -28,229 +24,268 @@ def train_transforms(image: np.ndarray, mask: np.ndarray = None) -> bytes:
     return _apply_augmentations(image, mask=mask, 
                                 level_probs={0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
 
-
-def val_transforms(image: np.ndarray) -> bytes:
-    return _apply_augmentations(image, level_probs={0: 0.25, 1: 0.25, 2: 0.25, 3: 0.25})
-
 def val_transforms_lvl0(image: np.ndarray) -> bytes:
     return _apply_augmentations(image, level_probs={0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
 
-def val_transforms_lvl1(image: np.ndarray) -> bytes:
-    return _apply_augmentations(image, level_probs={0: 0.0, 1: 1.0, 2: 0.0, 3: 0.0})
 
-def val_transforms_lvl2(image: np.ndarray) -> bytes:
-    return _apply_augmentations(image, level_probs={0: 0.0, 1: 0.0, 2: 1.0, 3: 0.0})
-
-def val_transforms_lvl3(image: np.ndarray) -> bytes:
-    return _apply_augmentations(image, level_probs={0: 0.0, 1: 0.0, 2: 0.0, 3: 1.0})
+DATA_DIR = "/mnt/bitmind/datasets/datasets"
+TEST_DATA_DIR = "/mnt/bitmind/test/datasets"
 
 
-
-main_data = []
-main_dataset_dict = {}
-with open("all_video.jsonl", 'r') as f:
-    for line in tqdm(f, desc="Loading dataset"):
-        d = json.loads(line)
-        dataset = d["dataset"]
-        video = d["original_video_path"]
-        if dataset not in main_dataset_dict:
-            main_dataset_dict[dataset] = {}
-        if video not in main_dataset_dict[dataset]:
-            main_dataset_dict[dataset][video] = []
-        main_dataset_dict[dataset][video].append(d)
-for dataset_name in main_dataset_dict.keys():
-    print(f"{dataset_name}: {len(main_dataset_dict[dataset_name])}")
+label_to_int = {
+    "real": 0,
+    "synthetic": 1,
+    "semisynthetic": 1
+}
 
 
 class CustomDataset(Dataset):    
-    def __init__(self, dataset_file: str, is_training: bool = False, label_map: Dict[int, int] = None, weights: Dict[str, float] = None):
-        self.dataset_file = dataset_file
+    def __init__(self, is_training: bool = False, limit_per_dataset: int = None,
+                 num_frames=16, height=224, width=224):
         self.is_training = is_training
-        self.label_map = label_map
-        self._load_data(weights)
-        self.custom_transforms = train_transforms if is_training else val_transforms
+        self.limit_per_dataset = limit_per_dataset
+        self.num_frames = num_frames
+        self.height = height
+        self.width = width
+        self._load_data()
+        self.custom_transforms = train_transforms if is_training else val_transforms_lvl0
 
-    def _load_data(self, weights: Dict[str, float]):
+        self.aug_list = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        
+    # Add this dummy method to prevent AttributeError when loading test dataset without calling _load_data
+    def _dummy_video(self):
+        # (T, C, H, W) float tensor of zeros
+        x = torch.zeros((self.num_frames, 3, self.height, self.width), dtype=torch.float32)
+        y = torch.tensor(0, dtype=torch.long)
+        w = torch.tensor(0.0, dtype=torch.float32) # set weight to 0 => ignored in loss / metric
+        return x, y, w
+
+    def _load_data(self, data_dir: str = DATA_DIR):
         data = []
     
-        for dataset_name, video_dict in main_dataset_dict.items():
-            loop = int(weights.get(dataset_name, 1))
-            unique_videos = list(video_dict.keys())
-            limit_per_dataset = self.limit_per_dataset if self.limit_per_dataset != -1 else len(unique_videos)
-            for _ in range(loop):
-                sampled_videos = random.sample(unique_videos, min(limit_per_dataset, len(unique_videos)))
-
-                for video in sampled_videos:
-                    frames = video_dict[video]
-                    if len(frames) < 4:
-                        continue
-                    # sort frames by frame_path
-                    frames.sort(key=lambda x: x['frame_path'])
-                    data.append(frames[:4])
+        for dataset_name in os.listdir(data_dir):
+            if dataset_name in [
+                # "eidon-video",
+                # "semisynthetic-video",
+                # "fakeparts-faceswap",
+                # "dfd-real",
+                # "dfd-fake",
+                "celeb-df-v2",
+                "celeb-df-v1",
+                # "rtfs-10k-inswapper",
+                "rtfs-10k-uniface",
+                # "rtfs-10k-original_videos",
+                "UADFV-fake",
+                "UADFV-real",
+                # Thêm các dataset không có trong round này
+                "evalcrafter-t2v",
+                "text-2-video-human-preferences-moonvalley-marey",
+                "lovora-real"
+            ]:
+                continue
+            dataset_sample = []
+            dataset_path = os.path.join(data_dir, dataset_name)
+            if dataset_name == "gasstation-generated-videos":
+                week_dirs = os.listdir(dataset_path)
+            else:
+                week_dirs = [""]
+            for week_dir in week_dirs:
+                if not os.path.exists(os.path.join(dataset_path, week_dir, "sample_metadata.json")):
+                    continue
+                with open(os.path.join(dataset_path, week_dir, "sample_metadata.json"), "r") as f:
+                    metadata = json.load(f)
+                for video_name in metadata:
+                    dataset_sample.append(
+                        {
+                            "video_path": os.path.join(dataset_path, week_dir, "samples", video_name),
+                            "label": metadata[video_name]["media_type"],
+                            "dataset_name": dataset_name,
+                        }
+                    )
+                if self.limit_per_dataset is not None:
+                    dataset_sample = random.sample(dataset_sample, min(self.limit_per_dataset, len(dataset_sample)))
+                data.extend(dataset_sample)
         self.data = data
 
-    def load_image(self, item: dict):
-        # image = Image.open(item['frame_path']).convert("RGB")
-        image = cv2.imread(item['frame_path'], cv2.IMREAD_COLOR)
-        return image
-    
-    def __getitem__(self, idx: int):
-        item = self.data[idx]
-        image = self.load_image(item)
-        
-        image = image.copy()  # Fix: Make a copy to avoid negative strides (in case of future transforms)
-        image = torch.from_numpy(image)
-        
-        label = item['label']
-        if self.label_map is not None:
-            label = self.label_map[label]
-        label = torch.tensor(label, dtype=torch.long)
+    def _load_video(self, video_path: str):
+        """
+        Load a video and return it as a resized uint8 numpy array of shape (T, H, W, C).
+        """
+        vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
+        total_frames = len(vr)
+        if total_frames == 0:
+            raise ValueError(f"No frames in video")
+        max_frames = 16
+        frames = []
+        for i in range(min(max_frames, total_frames)):
+            frame = vr[i].asnumpy()  # Already RGB, shape (H, W, C)
+            if frame is None or frame.size == 0:
+                raise ValueError(f"Skipping invalid frame at index {i}")
+            # Deterministic resize per-frame
+            frames.append(frame)
+        if len(frames) < max_frames:
+            last_frame = frames[-1]
+            for i in range(len(frames), max_frames):
+                frames.append(last_frame)
+        video_array = np.array(frames, dtype=np.uint8)  # THWC uint8 RGB
+        aug_video_array = self.custom_transforms(video_array)
+        aug_tchw = np.transpose(aug_video_array, (0, 3, 1, 2))
 
-        source = item["dataset"]
-        return image, label, source
+        return aug_tchw
+
+    # def __getitem__(self, idx: int):
+    #     try:
+    #         item = self.data[idx]
+    #         video_path = item["video_path"]
+    #         video_array = self._load_video(video_path)
+    #         frames = []
+    #         for frame in video_array:
+    #             frame = frame.transpose(1, 2, 0)
+    #             frame = self.aug_list(frame)
+    #             frames.append(frame)
+    #         video_array = torch.stack(frames)
+
+    #         label = item["label"]
+    #         int_label = label_to_int[label]
+    #         label = torch.tensor(int_label, dtype=torch.long)
+    #         return video_array, label
+    #     except Exception as e:
+    #         print(f"Error loading item {item['video_path']}: {e}")
+    #         return self.__getitem__(0)
     
+    # Use this version of __getitem__ to handle error cases without crashing the dataloader
+    def __getitem__(self, idx: int):
+        max_tries = 8
+        last_err = None
+
+        for _ in range(max_tries):
+            item = self.data[idx]
+            video_path = item["video_path"]
+            try:
+                video_array = self._load_video(video_path)  # bạn đảm bảo trả về (T,C,H,W) uint8/float OK
+
+                frames = []
+                for frame in video_array:              # frame: C,H,W
+                    frame = frame.transpose(1, 2, 0)   # H,W,C (numpy)
+                    # ép 3 kênh để tránh 6 vs 3
+                    if frame.shape[-1] > 3:
+                        frame = frame[..., :3]
+                    elif frame.shape[-1] == 1:
+                        frame = np.repeat(frame, 3, axis=-1)
+
+                    frame = self.aug_list(frame)       # tensor C,H,W float normalized
+                    frames.append(frame)
+
+                x = torch.stack(frames)  # T,C,H,W
+
+                y = torch.tensor(label_to_int[item["label"]], dtype=torch.long)
+                w = torch.tensor(1.0, dtype=torch.float32)  # valid sample
+                return x, y, w
+
+            except Exception as e:
+                last_err = e
+                # chọn index khác để retry, tránh dính mãi 1 file lỗi
+                idx = random.randrange(len(self.data))
+                
+        print(f"Failed to load video after {max_tries} attempts, last error: {last_err}")
+        return self._dummy_video()
+
     def __len__(self) -> int:
         return len(self.data)
 
 
 class TrainDataset(CustomDataset):
-    def __init__(self, dataset_file: str, label_map: Dict[int, int] = None, weights: Dict[str, float] = {}, limit_per_dataset=-1):
-        self.limit_per_dataset = limit_per_dataset
-        super().__init__(dataset_file, is_training=True, label_map=label_map, weights=weights)
-
-    def __getitem__(self, idx: int):
-        try:
-            item = self.data[idx]
-            frames = []
-            for frame in item:
-                image = self.load_image(frame)
-                frames.append(image)
-                video_array = np.array(frames, dtype=np.uint8)
-        except Exception as e:
-            item = self.data[idx - 1] if idx - 1 >= 0 else self.data[idx + 1]
-            frames = []
-            for frame in item:
-                image = self.load_image(frame)
-                frames.append(image)
-                video_array = np.array(frames, dtype=np.uint8)
-        
-        aug_thwc = self.custom_transforms(video_array)
-        video_array = np.transpose(aug_thwc / 255.0, (0, 3, 1, 2))
-        video_array = torch.from_numpy(video_array.copy()).float()
-        # Normalize with ImageNet mean and std
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        video_array = (video_array - mean) / std
-        if video_array.shape[0] < 8:
-            video_array = torch.cat([video_array, torch.zeros((8 - video_array.shape[0], video_array.shape[1], video_array.shape[2], video_array.shape[3]))], dim=0)
-        label = item[0]['label']
-        if self.label_map is not None:
-            label = self.label_map[label]
-        label = torch.tensor(label, dtype=torch.long)
-
-        return video_array, label
-
-    def _load_data(self, weights: Dict[str, float]):
-        data = []
-    
-        for dataset_name, video_dict in main_dataset_dict.items():
-            loop = int(weights.get(dataset_name, 1))
-            unique_videos = list(video_dict.keys())
-            limit_per_dataset = self.limit_per_dataset if self.limit_per_dataset != -1 else len(unique_videos)
-            for _ in range(loop):
-                if limit_per_dataset >= len(unique_videos):
-                    sampled_videos = unique_videos
-                else:
-                    sampled_videos = random.sample(unique_videos, min(limit_per_dataset, len(unique_videos)))
-
-                for video in sampled_videos:
-                    frames = video_dict[video]
-                    frames.sort(key=lambda x: x['frame_path'])
-                    data.append(frames[:8])
-        self.data = data
+    def __init__(self):
+        super().__init__(is_training=True, limit_per_dataset=2500)
 
 
 class ValDataset(CustomDataset):
-    def __init__(self, dataset_file: str, label_map: Dict[int, int] = None):
-        self.custom_transforms_list = [
-            val_transforms_lvl0,
-            # val_transforms_lvl1,
-            # val_transforms_lvl2,
-            # val_transforms_lvl3,
-        ]
-        super().__init__(dataset_file, is_training=False, label_map=label_map, weights={})
+    def __init__(self):
+        # Use validation transforms (no heavy random augs)
+        super().__init__(is_training=False, limit_per_dataset=100)
 
+    # def __getitem__(self, idx: int):
+    #     try:
+    #         item = self.data[idx]
+    #         video_path = item["video_path"]
+
+    #         video_array = self._load_video(video_path)
+    #         frames = []
+    #         for frame in video_array:
+    #             frame = frame.transpose(1, 2, 0)
+    #             frame = self.aug_list(frame)
+    #             frames.append(frame)
+    #         video_array = torch.stack(frames)
+    #         label = item["label"]
+    #         int_label = label_to_int[label]
+    #         label = torch.tensor(int_label, dtype=torch.long)
+    #         dataset_name = item["dataset_name"]
+    #         return video_array, label, dataset_name
+    #     except Exception as e:
+    #         print(f"Error loading item {item['video_path']}: {e}")
+    #         return self.__getitem__(0)
+    
+    def _dummy_video(self):
+        # (T, C, H, W) float tensor of zeros
+        x = torch.zeros((self.num_frames, 3, self.height, self.width), dtype=torch.float32)
+        y = torch.tensor(0, dtype=torch.long)
+        w = torch.tensor(0.0, dtype=torch.float32) # set weight to 0 => ignored in loss / metric
+        dataset_name = "dummy"
+        return x, y, dataset_name, w
+    
     def __getitem__(self, idx: int):
-        item = self.data[idx]
-        level = idx % len(self.custom_transforms_list)
-        frames = []
-        for frame in item:
-            image = self.load_image(frame)
-            frames.append(image)
-        video_array = np.array(frames, dtype=np.uint8)
-        aug_thwc = self.custom_transforms_list[level](video_array)
-        video_array = np.transpose(aug_thwc / 255.0, (0, 3, 1, 2))
-        video_array = torch.from_numpy(video_array.copy()).float()
-        if video_array.shape[0] < 8:
-            video_array = torch.cat([video_array, torch.zeros((8 - video_array.shape[0], video_array.shape[1], video_array.shape[2], video_array.shape[3]))], dim=0)
-        # Normalize with ImageNet mean and std
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        video_array = (video_array - mean) / std
-        label = item[0]['label']
-        if self.label_map is not None:
-            label = self.label_map[label]
-        label = torch.tensor(label, dtype=torch.long)
-        source = item[0]['dataset']
+        max_tries = 8
+        last_err = None
 
-        return video_array, label, source, level
+        for _ in range(max_tries):
+            item = self.data[idx]
+            video_path = item["video_path"]
+            try:
+                video_array = self._load_video(video_path)  # bạn đảm bảo trả về (T,C,H,W) uint8/float OK
 
-fix_val_dataset_dict = {}
-with open("val_video.jsonl", 'r') as f:
-    for line in f:
-        d = json.loads(line)
-        dataset = d["dataset"]
-        video = d["original_video_path"]
-        if dataset not in fix_val_dataset_dict:
-            fix_val_dataset_dict[dataset] = {}
-        if video not in fix_val_dataset_dict[dataset]:
-            fix_val_dataset_dict[dataset][video] = []
-        fix_val_dataset_dict[dataset][video].append(d)
+                frames = []
+                for frame in video_array:              # frame: C,H,W
+                    frame = frame.transpose(1, 2, 0)   # H,W,C (numpy)
+                    # ép 3 kênh để tránh 6 vs 3
+                    if frame.shape[-1] > 3:
+                        frame = frame[..., :3]
+                    elif frame.shape[-1] == 1:
+                        frame = np.repeat(frame, 3, axis=-1)
 
-class FixValDataset(ValDataset):
-    def __init__(self, dataset_file: str, label_map: Dict[int, int] = None):
-        super().__init__(dataset_file, label_map=label_map)
+                    frame = self.aug_list(frame)       # tensor C,H,W float normalized
+                    frames.append(frame)
 
-    def _load_data(self, weights: Dict[str, float]):
-        data = []
+                x = torch.stack(frames)  # T,C,H,W
 
-        for dataset_name, video_dict in fix_val_dataset_dict.items():
-            for video in video_dict.keys():
-                frames = video_dict[video]
-                frames.sort(key=lambda x: x['frame_path'])
-                data.append(frames[:8])
-        self.data = data
+                y = torch.tensor(label_to_int[item["label"]], dtype=torch.long)
+                w = torch.tensor(1.0, dtype=torch.float32)  # valid sample
+                dataset_name = item["dataset_name"]
+                return x, y, dataset_name, w
+
+            except Exception as e:
+                last_err = e
+                # chọn index khác để retry, tránh dính mãi 1 file lỗi
+                idx = random.randrange(len(self.data))
+                
+        print(f"Failed to load video after {max_tries} attempts, last error: {last_err}")
+        return self._dummy_video()
 
 
-class RandomValDataset(ValDataset):
-    def __init__(self, dataset_file: str, label_map: Dict[int, int] = None):
-        super().__init__(dataset_file, label_map=label_map)
+class TestDataset(CustomDataset):
+    def __init__(self):
+        super().__init__(is_training=False, limit_per_dataset=None)
+        self._load_data(data_dir=TEST_DATA_DIR)
+        
 
-    def _load_data(self, weights: Dict[str, float]):
-        data = []
-    
-        for dataset_name, video_dict in main_dataset_dict.items(): 
-            unique_videos = list(video_dict.keys())
-            sampled_videos = random.sample(unique_videos, min(200, len(unique_videos)))
-    
-            for video in sampled_videos:
-                frames = video_dict[video]
-                frames.sort(key=lambda x: x['frame_path'])
-                data.append(frames[:8])
-        self.data = data
-
-
-# if __name__ == "__main__":
-#     dataset = TrainDataset(dataset_file="all_first_16_3_classes_overfit_expended.jsonl")
-#     print(len(dataset))
-#     print(dataset[0])
+if __name__ == "__main__":
+    from torch.utils.data import DataLoader
+    import lightning as L
+    L.seed_everything(42)
+    train_dataset = TrainDataset()
+    dataloader = DataLoader(train_dataset, batch_size=8, num_workers=8)
+    for video_array, label in dataloader:
+        print(video_array.shape, label)
+        # break
