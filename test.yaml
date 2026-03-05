@@ -1,0 +1,53 @@
+# Video Dataset Configurations
+#
+# data_columns: specify column name(s) containing media bytes in parquet files
+#   - Use when the column is not auto-detected (e.g., "video_bytes" instead of "video")
+#   - Can specify multiple columns to extract from each row
+
+benchmark_size: 20000
+
+datasets:
+  - name: MVAD
+    path: mengxuebobo/MVAD
+    modality: video
+    media_type: synthetic
+    source_format: zip
+    media_per_archive: -1
+    archives_per_dataset: -1
+    include_paths: ["fake_fake"]
+
+  - name: vf-eval
+    path: songtingyu/vf-eval
+    modality: video
+    media_type: synthetic
+    source_format: zip
+    media_per_archive: -1
+    archives_per_dataset: -1
+    include_paths: ["videos.zip"]
+  
+  - name: evalcrafter-t2v
+    path: RaphaelLiu/EvalCrafter_T2V_Dataset
+    modality: video
+    media_type: synthetic
+    source_format: tar.gz
+    media_per_archive: -1
+    archives_per_dataset: -1
+  
+  # - name: vidprom
+  #   path: bitmind/VidProM
+  #   modality: video
+  #   media_type: synthetic
+  #   source_format: tar
+  #   media_per_archive: -1
+  #   archives_per_dataset: -1
+  #   include_paths: ["_10.tar"]
+
+  # - name: GenVideo-Val
+  #   path: cccnju/Gen-Video
+  #   modality: video
+  #   media_type: synthetic
+  #   source_format: zip
+  #   media_per_archive: -1
+  #   archives_per_dataset: -1
+  #   include_paths: ["GenVideo-Val.zip"]
+  #   source: modelscope

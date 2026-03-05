@@ -29,7 +29,7 @@ L.seed_everything(42)
 # Configuration
 BATCH_SIZE = 4
 DEVICE_COUNT = 8
-EPOCHS = 50
+EPOCHS = 15
 NUM_WORKERS = 4
 
 
@@ -60,12 +60,12 @@ class ModelLightning(L.LightningModule):
         # self.model = torch.compile(self.model, mode='max-autotune')
         
         # Criterion
-        self.train_criterion = torch.nn.CrossEntropyLoss()
-        self.val_criterion = torch.nn.CrossEntropyLoss()
+        # self.train_criterion = torch.nn.CrossEntropyLoss()
+        # self.val_criterion = torch.nn.CrossEntropyLoss()
         # self.fix_val_criterion = torch.nn.CrossEntropyLoss()
         # self.random_val_criterion = torch.nn.CrossEntropyLoss()
-        # self.train_criterion = LabelSmoothingCrossEntropy(smoothing=0.01)
-        # self.val_criterion = LabelSmoothingCrossEntropy(smoothing=0.01)
+        self.train_criterion = LabelSmoothingCrossEntropy(smoothing=0.01)
+        self.val_criterion = LabelSmoothingCrossEntropy(smoothing=0.01)
         
         # Train metrics
         self.train_acc = Accuracy(task='multiclass', num_classes=2)
@@ -85,14 +85,22 @@ class ModelLightning(L.LightningModule):
                 "celeb-df-v2",
                 "celeb-df-v1",
                 # "rtfs-10k-inswapper",
-                "rtfs-10k-uniface",
+                # "rtfs-10k-uniface",
                 # "rtfs-10k-original_videos",
                 "UADFV-fake",
                 "UADFV-real",
                 # Thêm các dataset không có trong round này
-                "evalcrafter-t2v",
-                "text-2-video-human-preferences-moonvalley-marey",
-                "lovora-real"
+                # "evalcrafter-t2v",
+                # "text-2-video-human-preferences-moonvalley-marey",
+                # "lovora-real",
+                "Ivy-Fake-Youku_1M_10s-real",
+                # "Ivy-Fake-ZeroScope-fake",
+                # "Ivy-Fake-Kinetics-400-real",
+                # "Ivy-Fake-Kinetics-400-val-real",
+                "Ivy-Fake-SEINE-fake",
+                "Ivy-Fake-OpenSora-fake",
+                "Ivy-Fake-DynamicCrafter-fake"
+                "video_archives",
             ]:
                 continue
             self.val_acc_by_source[dataset_name.replace('.', '_')] = Accuracy(task='multiclass', num_classes=2)
@@ -242,47 +250,53 @@ class ModelLightning(L.LightningModule):
         self.train_acc.reset()
         
     def configure_optimizers(self):
-        # optimizer = torch.optim.AdamW(
-        #     self.model.parameters(), 
-        #     lr=1e-5, 
-        #     weight_decay=1e-2,
-        # )
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(), 
+            lr=1e-5, 
+            weight_decay=1e-2,
+        )
         
-        muon_params, adam_params = split_muon_params(self.model)
-        param_groups = [
-            dict(
-                params=muon_params,
-                use_muon=True,
-                lr=3e-5,
-                momentum=0.95,
-                weight_decay=1e-2,
-            ),
-            dict(
-                params=adam_params,
-                use_muon=False,
-                lr=1e-5,
-                betas=(0.9, 0.95),
-                weight_decay=1e-2,
-            ),
-        ]
+        # muon_params, adam_params = split_muon_params(self.model)
+        # param_groups = [
+        #     dict(
+        #         params=muon_params,
+        #         use_muon=True,
+        #         lr=3e-5,
+        #         momentum=0.95,
+        #         weight_decay=1e-2,
+        #     ),
+        #     dict(
+        #         params=adam_params,
+        #         use_muon=False,
+        #         lr=1e-5,
+        #         betas=(0.9, 0.95),
+        #         weight_decay=1e-2,
+        #     ),
+        # ]
 
-        optimizer = MuonWithAuxAdam(param_groups)
+        warmup_steps = 100
+        # optimizer = MuonWithAuxAdam(param_groups)
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=0.1,
-            total_iters=100,
+            total_iters=warmup_steps,
         )
-
+        cosine_t_max = 10000
+        if self.trainer is None:
+            cosine_t_max = 10000
+        else:
+            cosine_t_max = 2 * (len(self.train_dataloader()) // DEVICE_COUNT)
+            
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=10000,
+            T_max=cosine_t_max,
             eta_min=1e-6,
         )
 
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[100],
+            milestones=[warmup_steps],
         )
     
         return {
@@ -297,7 +311,7 @@ class ModelLightning(L.LightningModule):
 
 def main():
     model_name = "microsoft/xclip-base-patch16-16-frames"
-    exp_name = "3_classes_video_demamba_muon_r12_loss_ce_wo_lovora_real_2802"
+    exp_name = "16_frames_demamba_adamw_r12_04_03"
     # ckpt_path = "/mnt/bitmind/34/bitmind_video/microsoft_xclip-base-patch16-16-frames_3_classes_video_5500_muon_851ad848/checkpoints/last.ckpt"
     ckpt_path = None
     if ckpt_path and os.path.exists(ckpt_path):

@@ -22,7 +22,7 @@ def _apply_augmentations(image: np.ndarray, level_probs: Dict[int, float],
 
 def train_transforms(image: np.ndarray, mask: np.ndarray = None) -> bytes:
     return _apply_augmentations(image, mask=mask, 
-                                level_probs={0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
+                                level_probs={0: 0.5, 1: 0.5, 2: 0.0, 3: 0.0})
 
 def val_transforms_lvl0(image: np.ndarray) -> bytes:
     return _apply_augmentations(image, level_probs={0: 1.0, 1: 0.0, 2: 0.0, 3: 0.0})
@@ -38,16 +38,99 @@ label_to_int = {
     "semisynthetic": 1
 }
 
+SKIP_DATASETS = {
+    "celeb-df-v2",
+    "celeb-df-v1",
+    # "rtfs-10k-uniface",
+    "UADFV-fake",
+    "UADFV-real",
+    # "evalcrafter-t2v",
+    # "lovora-real",
+    # Thêm các dataset sai nhãn
+    "Ivy-Fake-Youku_1M_10s-real",
+    # "Ivy-Fake-ZeroScope-fake",
+    # "Ivy-Fake-Kinetics-400-real",
+    # "Ivy-Fake-Kinetics-400-val-real",
+    "Ivy-Fake-SEINE-fake",
+    "Ivy-Fake-OpenSora-fake",
+    "Ivy-Fake-DynamicCrafter-fake"
+    "video_archives",
+}
+
+def load_all_samples(data_dir: str = DATA_DIR, skip_datasets: set = SKIP_DATASETS):
+    """Load all samples from data_dir, return dict[dataset_name] -> list of sample dicts."""
+    all_data = {}
+    for dataset_name in os.listdir(data_dir):
+        if dataset_name in skip_datasets:
+            continue
+        dataset_path = os.path.join(data_dir, dataset_name)
+        if dataset_name == "gasstation-generated-videos":
+            week_dirs = os.listdir(dataset_path)
+        else:
+            week_dirs = [""]
+
+        dataset_samples = []
+        for week_dir in week_dirs:
+            meta_path = os.path.join(dataset_path, week_dir, "sample_metadata.json")
+            if not os.path.exists(meta_path):
+                continue
+            with open(meta_path, "r") as f:
+                metadata = json.load(f)
+            for video_name in metadata:
+                dataset_samples.append({
+                    "video_path": os.path.join(dataset_path, week_dir, "samples", video_name),
+                    "label": metadata[video_name]["media_type"],
+                    "dataset_name": dataset_name,
+                })
+        if dataset_samples:
+            all_data[dataset_name] = dataset_samples
+    return all_data
+
+def split_train_val(data_dir: str = DATA_DIR,
+                    train_limit: int = 2000,
+                    real_bonus: int = 500,
+                    val_limit: int = 100,
+                    val_ratio: float = 0.05,
+                    seed: int = 42):
+
+    all_data = load_all_samples(data_dir)
+    rng = random.Random(seed)
+
+    train_samples = []
+    val_samples = []
+
+    for dataset_name, samples in all_data.items():
+        shuffled = samples.copy()
+        rng.shuffle(shuffled)
+
+        # Số lượng val: lấy min giữa val_limit và tỷ lệ val_ratio
+        val_count = min(val_limit, max(1, int(len(shuffled) * val_ratio)))
+        
+        is_real_dataset = all(s["label"] == "real" for s in samples)
+        effective_limit = train_limit + real_bonus if is_real_dataset else train_limit
+        
+        val_split = shuffled[:val_count]
+        train_pool = shuffled[val_count:]
+
+        # Giới hạn train
+        if effective_limit is not None:
+            train_split = train_pool[:effective_limit]
+        else:
+            train_split = train_pool
+
+        val_samples.extend(val_split)
+        train_samples.extend(train_split)
+
+    return train_samples, val_samples
 
 class CustomDataset(Dataset):    
-    def __init__(self, is_training: bool = False, limit_per_dataset: int = None,
+    def __init__(self, data: list, is_training: bool = False,
                  num_frames=16, height=224, width=224):
         self.is_training = is_training
-        self.limit_per_dataset = limit_per_dataset
+        self.data = data
         self.num_frames = num_frames
         self.height = height
         self.width = width
-        self._load_data()
         self.custom_transforms = train_transforms if is_training else val_transforms_lvl0
 
         self.aug_list = transforms.Compose([
@@ -62,53 +145,6 @@ class CustomDataset(Dataset):
         y = torch.tensor(0, dtype=torch.long)
         w = torch.tensor(0.0, dtype=torch.float32) # set weight to 0 => ignored in loss / metric
         return x, y, w
-
-    def _load_data(self, data_dir: str = DATA_DIR):
-        data = []
-    
-        for dataset_name in os.listdir(data_dir):
-            if dataset_name in [
-                # "eidon-video",
-                # "semisynthetic-video",
-                # "fakeparts-faceswap",
-                # "dfd-real",
-                # "dfd-fake",
-                "celeb-df-v2",
-                "celeb-df-v1",
-                # "rtfs-10k-inswapper",
-                "rtfs-10k-uniface",
-                # "rtfs-10k-original_videos",
-                "UADFV-fake",
-                "UADFV-real",
-                # Thêm các dataset không có trong round này
-                "evalcrafter-t2v",
-                "text-2-video-human-preferences-moonvalley-marey",
-                "lovora-real"
-            ]:
-                continue
-            dataset_sample = []
-            dataset_path = os.path.join(data_dir, dataset_name)
-            if dataset_name == "gasstation-generated-videos":
-                week_dirs = os.listdir(dataset_path)
-            else:
-                week_dirs = [""]
-            for week_dir in week_dirs:
-                if not os.path.exists(os.path.join(dataset_path, week_dir, "sample_metadata.json")):
-                    continue
-                with open(os.path.join(dataset_path, week_dir, "sample_metadata.json"), "r") as f:
-                    metadata = json.load(f)
-                for video_name in metadata:
-                    dataset_sample.append(
-                        {
-                            "video_path": os.path.join(dataset_path, week_dir, "samples", video_name),
-                            "label": metadata[video_name]["media_type"],
-                            "dataset_name": dataset_name,
-                        }
-                    )
-                if self.limit_per_dataset is not None:
-                    dataset_sample = random.sample(dataset_sample, min(self.limit_per_dataset, len(dataset_sample)))
-                data.extend(dataset_sample)
-        self.data = data
 
     def _load_video(self, video_path: str):
         """
@@ -170,7 +206,6 @@ class CustomDataset(Dataset):
                 frames = []
                 for frame in video_array:              # frame: C,H,W
                     frame = frame.transpose(1, 2, 0)   # H,W,C (numpy)
-                    # ép 3 kênh để tránh 6 vs 3
                     if frame.shape[-1] > 3:
                         frame = frame[..., :3]
                     elif frame.shape[-1] == 1:
@@ -187,7 +222,6 @@ class CustomDataset(Dataset):
 
             except Exception as e:
                 last_err = e
-                # chọn index khác để retry, tránh dính mãi 1 file lỗi
                 idx = random.randrange(len(self.data))
                 
         print(f"Failed to load video after {max_tries} attempts, last error: {last_err}")
@@ -199,13 +233,15 @@ class CustomDataset(Dataset):
 
 class TrainDataset(CustomDataset):
     def __init__(self):
-        super().__init__(is_training=True, limit_per_dataset=2500)
+        train_samples, _ = split_train_val()
+        super().__init__(data=train_samples, is_training=True)
 
 
 class ValDataset(CustomDataset):
     def __init__(self):
         # Use validation transforms (no heavy random augs)
-        super().__init__(is_training=False, limit_per_dataset=100)
+        _, val_samples = split_train_val()
+        super().__init__(data=val_samples, is_training=False)
 
     # def __getitem__(self, idx: int):
     #     try:
@@ -249,7 +285,6 @@ class ValDataset(CustomDataset):
                 frames = []
                 for frame in video_array:              # frame: C,H,W
                     frame = frame.transpose(1, 2, 0)   # H,W,C (numpy)
-                    # ép 3 kênh để tránh 6 vs 3
                     if frame.shape[-1] > 3:
                         frame = frame[..., :3]
                     elif frame.shape[-1] == 1:
@@ -276,16 +311,27 @@ class ValDataset(CustomDataset):
 
 class TestDataset(CustomDataset):
     def __init__(self):
-        super().__init__(is_training=False, limit_per_dataset=None)
-        self._load_data(data_dir=TEST_DATA_DIR)
+        all_test_data = load_all_samples(data_dir=TEST_DATA_DIR, skip_datasets=set())
+        test_samples = [s for samples in all_test_data.values() for s in samples]
+        super().__init__(data=test_samples, is_training=False)
         
 
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
     import lightning as L
     L.seed_everything(42)
+    
     train_dataset = TrainDataset()
+    val_dataset = ValDataset()
+    
+    # Verify no overlap
+    train_paths = {item["video_path"] for item in train_dataset.data}
+    val_paths = {item["video_path"] for item in val_dataset.data}
+    overlap = train_paths & val_paths
+    print(f"Train: {len(train_paths)}, Val: {len(val_paths)}, Overlap: {len(overlap)}")
+    assert len(overlap) == 0, f"Found {len(overlap)} overlapping samples!"
+    
     dataloader = DataLoader(train_dataset, batch_size=8, num_workers=8)
-    for video_array, label in dataloader:
-        print(video_array.shape, label)
-        # break
+    for video_array, label, w in dataloader:
+        print(video_array.shape, label, w)
+        break
